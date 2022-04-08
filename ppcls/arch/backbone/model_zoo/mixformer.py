@@ -1,4 +1,4 @@
-# copyright (c) 2021 PaddlePaddle Authors. All Rights Reserve.
+# copyright (c) 2022 PaddlePaddle Authors. All Rights Reserve.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Code was based on https://github.com/microsoft/Swin-Transformer
 
 import numpy as np
 import paddle
@@ -274,25 +273,6 @@ class MixingAttention(nn.Layer):
         x = self.proj_drop(x)
         return x
 
-    def extra_repr(self):
-        return "dim={}, window_size={}, num_heads={}".format(
-            self.dim, self.window_size, self.num_heads)
-
-    def flops(self, N):
-        # calculate flops for 1 window with token length of N
-        flops = 0
-        # projection layers
-        flops += N * self.dim * self.dim * 3 // 2
-        # qkv = self.qkv(x)
-        flops += N * self.dim * 3 * self.dim
-        # attn = (q @ k.transpose(-2, -1))
-        flops += self.num_heads * N * (self.dim // self.num_heads) * N
-        #  x = (attn @ v)
-        flops += self.num_heads * N * N * (self.dim // self.num_heads)
-        # x = self.proj(x)
-        flops += N * self.dim * self.dim
-        return flops
-
 
 class MixingBlock(nn.Layer):
     r""" Mixing Block in MixFormer.
@@ -431,45 +411,6 @@ class MixingBlock(nn.Layer):
 
         return x
 
-    def extra_repr(self):
-        return "dim={}, input_resolution={}, num_heads={}, \
-            window_size={}, shift_size={}, mlp_ratio={}".format(
-            self.dim, self.input_resolution, self.num_heads, self.window_size,
-            self.shift_size, self.mlp_ratio)
-
-    def flops(self):
-        flops = 0
-        H, W = self.input_resolution
-        # norm1
-        flops += self.dim * H * W
-
-        # Mixing Attention
-        flops += self.dim * H * W  # proj_cnn_norm
-        flops += self.dim // 2 * H * W  # proj_attn_norm
-        flops += self.dim * 1 * (self.conv_kernel_size ** 2) * H * W  # dwconv
-        flops += self.dim * H * W  # batchnorm
-        flops += self.dim * self.dim // 2 * H * W  # conv1x1
-        # channel_interaction
-        flops += self.dim * self.dim // 8 * 1 * 1
-        flops += self.dim // 8 * 1 * 1
-        flops += self.dim // 8 * self.dim // 2 * 1 * 1
-        # spatial_interaction
-        flops += self.dim // 2 * self.dim // 16 * H * W
-        flops += self.dim // 16 * H * W
-        flops += self.dim // 16 * 1 * H * W
-        # branch norms
-        flops += self.dim // 2 * H * W
-        flops += self.dim // 2 * H * W
-        # inside Mixing Attention
-        nW = H * W / self.window_size / self.window_size
-        flops += nW * self.attn.flops(self.window_size * self.window_size)
-
-        # mlp
-        flops += 2 * H * W * self.dim * self.dim * self.mlp_ratio
-        # norm2
-        flops += self.dim * H * W
-        return flops
-
 
 class ConvMerging(nn.Layer):
     r""" Conv Merging Layer.
@@ -504,15 +445,6 @@ class ConvMerging(nn.Layer):
         # B, C, H, W -> B, H*W, C
         x = self.reduction(x).flatten(2).transpose([0, 2, 1])
         return x
-
-    def extra_repr(self) -> str:
-        return f"input_resolution={self.input_resolution}, dim={self.dim}"
-
-    def flops(self):
-        H, W = self.input_resolution
-        flops = H * W * self.dim
-        flops += (H // 2) * (W // 2) * 4 * self.dim * 2 * self.dim
-        return flops
 
 
 class BasicLayer(nn.Layer):
@@ -602,18 +534,6 @@ class BasicLayer(nn.Layer):
         else:
             return H, W, x, H, W
 
-    def extra_repr(self):
-        return "dim={}, input_resolution={}, depth={}".format(
-            self.dim, self.input_resolution, self.depth)
-
-    def flops(self):
-        flops = 0
-        for blk in self.blocks:
-            flops += blk.flops()
-        if self.downsample is not None:
-            flops += self.downsample.flops()
-        return flops
-
 
 class ConvEmbed(nn.Layer):
     r""" Image to Conv Stem Embedding
@@ -688,26 +608,6 @@ class ConvEmbed(nn.Layer):
         x = x.transpose([0, 2, 1])
         x = x.reshape([-1, self.embed_dim, Wh, Ww])
         return x
-
-    def flops(self):
-        Ho, Wo = self.patches_resolution
-        # stem first 3x3 + BN
-        flops = (Ho * 2) * (Wo * 2) * self.embed_dim // 2 * self.in_chans * 9
-        flops += (Ho * 2) * (Wo * 2) * self.embed_dim // 2
-        # stem second 3x3 + BN
-        flops += (Ho * 2) * (Wo * 2) * self.embed_dim // 2 * \
-            self.embed_dim // 2 * 9
-        flops += (Ho * 2) * (Wo * 2) * self.embed_dim // 2
-        # stem third 3x3 + BN
-        flops += (Ho * 2) * (Wo * 2) * self.embed_dim // 2 * \
-            self.embed_dim // 2 * 9
-        flops += (Ho * 2) * (Wo * 2) * self.embed_dim // 2
-        # proj
-        flops += Ho * Wo * self.embed_dim * self.embed_dim // 2 * (
-            self.patch_size[0] // 4 * self.patch_size[1] // 4)
-        if self.norm is not None:
-            flops += Ho * Wo * self.embed_dim
-        return flops
 
 
 class MixFormer(nn.Layer):
@@ -869,20 +769,6 @@ class MixFormer(nn.Layer):
         x = self.forward_features(x)
         x = self.head(x)
         return x
-
-    def flops(self):
-        flops = 0
-        flops += self.patch_embed.flops()
-        for _, layer in enumerate(self.layers):
-            flops += layer.flops()
-        # norm
-        flops += self.num_features * self.patches_resolution[
-            0] * self.patches_resolution[1] // (2**self.num_layers)
-        # last proj
-        flops += self.num_features * 1280 * self.patches_resolution[
-            0] * self.patches_resolution[1] // (2 ** self.num_layers)
-        flops += 1280 * self.num_classes
-        return flops
 
 
 def _load_pretrained(pretrained, model, model_url, use_ssld=False):
